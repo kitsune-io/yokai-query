@@ -205,9 +205,11 @@ function App() {
   const [mediaStatus, setMediaStatus] = useState<
     "idle" | "requesting" | "granted" | "denied"
   >("idle");
+  const [mirrorCamera, setMirrorCamera] = useState(true);
   const webrtcLocalRef = useRef<HTMLVideoElement | null>(null);
   const webrtcRemoteRef = useRef<HTMLVideoElement | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
+  const mirroredStreamRef = useRef<MediaStream | null>(null);
   const webrtcPeersRef = useRef<{
     a?: ReturnType<typeof createWebRtcPeer>;
     b?: ReturnType<typeof createWebRtcPeer>;
@@ -560,6 +562,52 @@ function App() {
       pushLog(`media permissions denied ${String(err)}`);
       return null;
     }
+  };
+  const createMirroredStream = async (
+    source: MediaStream
+  ): Promise<MediaStream> => {
+    const [videoTrack] = source.getVideoTracks();
+    if (!videoTrack) return source;
+    const video = document.createElement("video");
+    video.muted = true;
+    video.playsInline = true;
+    video.srcObject = source;
+    await video.play().catch(() => {});
+    await new Promise<void>((resolve) => {
+      if (video.readyState >= 2) {
+        resolve();
+        return;
+      }
+      const handler = () => {
+        video.removeEventListener("loadedmetadata", handler);
+        resolve();
+      };
+      video.addEventListener("loadedmetadata", handler);
+    });
+    const canvas = document.createElement("canvas");
+    const width = video.videoWidth || 640;
+    const height = video.videoHeight || 480;
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    const draw = () => {
+      if (!ctx) return;
+      ctx.save();
+      ctx.scale(-1, 1);
+      ctx.drawImage(video, -width, 0, width, height);
+      ctx.restore();
+      requestAnimationFrame(draw);
+    };
+    draw();
+    const mirrored = canvas.captureStream(30);
+    source.getAudioTracks().forEach((track) => mirrored.addTrack(track));
+    return mirrored;
+  };
+  const clearVideo = (el: HTMLVideoElement | null) => {
+    if (!el) return;
+    el.srcObject = null;
+    el.src = "";
+    el.load();
   };
 
   return (
@@ -1119,20 +1167,22 @@ function App() {
                   };
                   const stream =
                     mediaStreamRef.current ?? (await requestMedia());
+                  const sendStream =
+                    stream && mirrorCamera
+                      ? await createMirroredStream(stream)
+                      : stream;
+                  if (sendStream !== stream) {
+                    mirroredStreamRef.current = sendStream ?? null;
+                  }
                   const peerA = createWebRtcPeer({
                     id: "a",
                     roomId: "demo",
-                    stream,
+                    stream: sendStream,
                     onSignal: sendSignal,
                     onData: (data) =>
                       setWebrtcLog((prev) =>
                         [`peerA data: ${data}`, ...prev].slice(0, 20)
                       ),
-                    onTrack: (event) => {
-                      if (webrtcRemoteRef.current) {
-                        webrtcRemoteRef.current.srcObject = event.streams[0];
-                      }
-                    },
                     onStateChange: (state) => setWebrtcStatus(state),
                   });
                   const peerB = createWebRtcPeer({
@@ -1144,6 +1194,11 @@ function App() {
                       setWebrtcLog((prev) =>
                         [`peerB data: ${data}`, ...prev].slice(0, 20)
                       ),
+                    onTrack: (event) => {
+                      if (webrtcRemoteRef.current) {
+                        webrtcRemoteRef.current.srcObject = event.streams[0];
+                      }
+                    },
                     onStateChange: (state) =>
                       setWebrtcLog((prev) =>
                         [`peerB state: ${state}`, ...prev].slice(0, 20)
@@ -1186,6 +1241,11 @@ function App() {
                   webrtcPeersRef.current.a?.close();
                   webrtcPeersRef.current.b?.close();
                   webrtcPeersRef.current = {};
+                  mirroredStreamRef.current?.getTracks().forEach((track) => {
+                    track.stop();
+                  });
+                  mirroredStreamRef.current = null;
+                  clearVideo(webrtcRemoteRef.current);
                   setWebrtcStatus("closed");
                   setWebrtcLog((prev) => ["closed", ...prev].slice(0, 20));
                 }}
@@ -1204,13 +1264,28 @@ function App() {
             <div className="row muted" style={{ marginTop: 6 }}>
               <span>Media: {mediaStatus}</span>
             </div>
+            <div className="row" style={{ marginTop: 8 }}>
+              <label className="row muted">
+                <input
+                  type="checkbox"
+                  checked={mirrorCamera}
+                  onChange={(e) => setMirrorCamera(e.target.checked)}
+                />
+                Mirror camera
+              </label>
+            </div>
             <div className="row" style={{ marginTop: 12 }}>
               <video
                 ref={webrtcLocalRef}
                 autoPlay
                 muted
                 playsInline
-                style={{ width: 160, height: 120, background: "#111" }}
+                style={{
+                  width: 160,
+                  height: 120,
+                  background: "#111",
+                  transform: mirrorCamera ? "scaleX(-1)" : "none",
+                }}
               />
               <video
                 ref={webrtcRemoteRef}
